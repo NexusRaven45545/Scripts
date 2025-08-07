@@ -100,21 +100,149 @@ local Config = {
         ToggleGUI = Enum.KeyCode.RightControl,
         ToggleESP = Enum.KeyCode.F1,
         ToggleNoclip = Enum.KeyCode.N,
-        ToggleFly = Enum.KeyCode.F
+        ToggleFly = Enum.KeyCode.F,
+        ToggleAutoInteract = Enum.KeyCode.I,
+        RefreshESP = Enum.KeyCode.R
     }
 }
 
--- ESP System with Auto-Refresh
+-- ESP System with Auto-Refresh and Smart Filtering
 local ESPObjects = {}
 local ESPConnections = {}
 
-local function CreateESP(object, name, color, espType)
-    if not object or not object.Parent then return end
+-- Smart item detection lists
+local ImportantItems = {
+    -- Keys
+    "Key", "ElectricalRoomKey", "SkeletonKey", "RoomKey", "LibraryHallwayDoor",
+    -- Tools
+    "Lockpick", "Flashlight", "Candle", "Lighter", "Scanner", "Crucifix",
+    -- Consumables
+    "Vitamins", "Bandage", "Battery", "Batteries",
+    -- Books and Papers
+    "LibraryHintPaper", "Book", "Paper", "Hint",
+    -- Interactive Objects
+    "Lever", "Button", "Switch", "Valve", "Fuse", "Painting",
+    -- Special Items
+    "Herb", "Potion", "Shakelight", "Gloombat"
+}
+
+local EntityNames = {
+    "Seek", "Screech", "A90", "Rush", "Ambush", "Eyes", "Halt",
+    "Figure", "Dupe", "Timothy", "Jack", "Shadow", "Glitch", "Window"
+}
+
+local InteractableObjects = {
+    "Door", "Drawer", "Wardrobe", "Closet", "Chest", "Cabinet",
+    "Lever", "Button", "Switch", "Valve"
+}
+
+-- Filter function to avoid lag from unnecessary objects
+local function ShouldESPObject(object)
+    if not object or not object.Parent then return false end
+
+    local name = object.Name:lower()
+
+    -- Skip common props that cause lag
+    local skipPatterns = {
+        "mesh", "meshpart", "part", "union", "wedge", "cylinder", "sphere",
+        "decal", "texture", "surfacegui", "billboardgui", "light", "sound",
+        "script", "localscript", "modulescript", "folder", "model",
+        "attachment", "weld", "motor6d", "humanoid", "bodyposition"
+    }
+
+    for _, pattern in pairs(skipPatterns) do
+        if name:find(pattern) and not name:find("door") and not name:find("key") then
+            return false
+        end
+    end
+
+    -- Check if it's an important item
+    for _, item in pairs(ImportantItems) do
+        if name:find(item:lower()) then
+            return true
+        end
+    end
+
+    -- Check if it's an entity
+    for _, entity in pairs(EntityNames) do
+        if name:find(entity:lower()) then
+            return true
+        end
+    end
+
+    -- Check if it's interactable
+    for _, interactable in pairs(InteractableObjects) do
+        if name:find(interactable:lower()) then
+            return true
+        end
+    end
+
+    -- Check if it has a ProximityPrompt (likely interactable)
+    if object:FindFirstChildOfClass("ProximityPrompt") then
+        return true
+    end
+
+    return false
+end
+
+local function GetItemDisplayName(object)
+    local name = object.Name
+
+    -- Clean up common naming patterns
+    name = name:gsub("_", " ")
+    name = name:gsub("([a-z])([A-Z])", "%1 %2") -- Add space before capitals
+
+    -- Specific item name mappings
+    local nameMap = {
+        ["ElectricalRoomKey"] = "Electrical Room Key",
+        ["LibraryHintPaper"] = "Library Hint",
+        ["SkeletonKey"] = "Skeleton Key",
+        ["LibraryHallwayDoor"] = "Library Door",
+        ["Shakelight"] = "Shake Light"
+    }
+
+    return nameMap[object.Name] or name
+end
+
+local function GetItemColor(object)
+    local name = object.Name:lower()
+
+    -- Color coding by item type
+    if name:find("key") then
+        return Color3.fromRGB(255, 215, 0) -- Gold for keys
+    elseif name:find("door") then
+        return Color3.fromRGB(0, 150, 255) -- Blue for doors
+    elseif name:find("lever") or name:find("button") or name:find("switch") then
+        return Color3.fromRGB(255, 165, 0) -- Orange for controls
+    elseif name:find("book") or name:find("paper") or name:find("hint") then
+        return Color3.fromRGB(160, 82, 45) -- Brown for books/papers
+    elseif name:find("flashlight") or name:find("candle") or name:find("lighter") then
+        return Color3.fromRGB(255, 255, 0) -- Yellow for light sources
+    elseif name:find("crucifix") then
+        return Color3.fromRGB(255, 255, 255) -- White for crucifix
+    elseif name:find("vitamins") or name:find("bandage") then
+        return Color3.fromRGB(0, 255, 0) -- Green for healing items
+    else
+        -- Check if it's an entity
+        for _, entity in pairs(EntityNames) do
+            if name:find(entity:lower()) then
+                return Color3.fromRGB(255, 0, 0) -- Red for entities
+            end
+        end
+        return Color3.fromRGB(255, 255, 255) -- White for other items
+    end
+end
+
+local function CreateESP(object, customName, customColor, espType)
+    if not object or not object.Parent or not ShouldESPObject(object) then return end
+
+    local displayName = customName or GetItemDisplayName(object)
+    local color = customColor or GetItemColor(object)
 
     local espData = {
         Object = object,
-        Name = name or object.Name,
-        Color = color or Color3.fromRGB(255, 255, 255),
+        Name = displayName,
+        Color = color,
         Type = espType or "Highlight",
         ESP = nil
     }
@@ -126,7 +254,9 @@ local function CreateESP(object, name, color, espType)
             Color = espData.Color,
             ESPType = espData.Type,
             MaxDistance = Config.ESP.MaxDistance,
-            Visible = Config.ESP.Enabled
+            Visible = Config.ESP.Enabled,
+            FillTransparency = 0.7,
+            OutlineTransparency = 0
         })
     end
 
@@ -146,59 +276,30 @@ end
 local function RefreshESP()
     if not Config.ESP.Enabled then return end
 
-    -- Clear old ESP
+    -- Clear old ESP for objects that no longer exist
     for object, data in pairs(ESPObjects) do
         if not object or not object.Parent then
             RemoveESP(object)
         end
     end
 
-    -- Doors-specific ESP targets
-    local targets = {
-        -- Entities
-        {folder = "Entities", color = Color3.fromRGB(255, 0, 0), type = "Highlight"},
-        -- Items
-        {folder = "Items", color = Color3.fromRGB(0, 255, 0), type = "Highlight"},
-        -- Doors
-        {folder = "Doors", color = Color3.fromRGB(0, 0, 255), type = "Highlight"},
-        -- Keys
-        {folder = "Keys", color = Color3.fromRGB(255, 255, 0), type = "Highlight"}
-    }
-
-    -- Scan workspace for new objects
-    for _, target in pairs(targets) do
-        local folder = Workspace:FindFirstChild(target.folder)
-        if folder then
-            for _, obj in pairs(folder:GetChildren()) do
-                if not ESPObjects[obj] then
-                    CreateESP(obj, obj.Name, target.color, target.type)
+    -- Scan current rooms for items
+    local currentRooms = Workspace:FindFirstChild("CurrentRooms")
+    if currentRooms then
+        for _, room in pairs(currentRooms:GetChildren()) do
+            -- Scan all descendants but filter smartly
+            for _, obj in pairs(room:GetDescendants()) do
+                if not ESPObjects[obj] and ShouldESPObject(obj) then
+                    CreateESP(obj)
                 end
             end
         end
     end
 
-    -- Scan current rooms
-    local currentRooms = Workspace:FindFirstChild("CurrentRooms")
-    if currentRooms then
-        for _, room in pairs(currentRooms:GetChildren()) do
-            -- Doors in rooms
-            local door = room:FindFirstChild("Door")
-            if door and not ESPObjects[door] then
-                CreateESP(door, "Door", Color3.fromRGB(0, 0, 255), "Highlight")
-            end
-
-            -- Items in rooms
-            local assets = room:FindFirstChild("Assets")
-            if assets then
-                for _, asset in pairs(assets:GetDescendants()) do
-                    if asset.Name:lower():find("key") or asset.Name:lower():find("lever") or
-                       asset.Name:lower():find("book") or asset.Name:lower():find("crucifix") then
-                        if not ESPObjects[asset] then
-                            CreateESP(asset, asset.Name, Color3.fromRGB(255, 255, 0), "Highlight")
-                        end
-                    end
-                end
-            end
+    -- Scan workspace for entities and important objects
+    for _, obj in pairs(Workspace:GetChildren()) do
+        if not ESPObjects[obj] and ShouldESPObject(obj) then
+            CreateESP(obj)
         end
     end
 end
@@ -391,6 +492,87 @@ function DoorsUtils.ToggleInstantInteract()
     end
 end
 
+-- Auto-Interact System
+local AutoInteract = {
+    Enabled = false,
+    Range = 20,
+    Blacklist = {
+        "Door", "NextArea", "MainDoor" -- Don't auto-interact with doors to avoid skipping rooms
+    }
+}
+
+function AutoInteract.Toggle()
+    AutoInteract.Enabled = not AutoInteract.Enabled
+
+    if AutoInteract.Enabled then
+        ESPConnections.AutoInteractConnection = RunService.Heartbeat:Connect(function()
+            if not RootPart then return end
+
+            local currentRooms = Workspace:FindFirstChild("CurrentRooms")
+            if not currentRooms then return end
+
+            for _, room in pairs(currentRooms:GetChildren()) do
+                for _, obj in pairs(room:GetDescendants()) do
+                    if obj:IsA("ProximityPrompt") then
+                        local parent = obj.Parent
+                        if not parent then continue end
+
+                        -- Check if object is in blacklist
+                        local isBlacklisted = false
+                        for _, blacklisted in pairs(AutoInteract.Blacklist) do
+                            if parent.Name:lower():find(blacklisted:lower()) then
+                                isBlacklisted = true
+                                break
+                            end
+                        end
+
+                        if isBlacklisted then continue end
+
+                        -- Check distance
+                        local objPosition = parent:GetPivot().Position
+                        local distance = (RootPart.Position - objPosition).Magnitude
+
+                        if distance <= AutoInteract.Range then
+                            -- Check if it's a useful item to interact with
+                            local objName = parent.Name:lower()
+                            local shouldInteract = false
+
+                            -- Items worth auto-collecting
+                            local autoCollectItems = {
+                                "key", "flashlight", "lockpick", "crucifix", "vitamins",
+                                "bandage", "battery", "candle", "lighter", "book", "lever",
+                                "button", "switch", "valve", "drawer", "wardrobe", "closet"
+                            }
+
+                            for _, item in pairs(autoCollectItems) do
+                                if objName:find(item) then
+                                    shouldInteract = true
+                                    break
+                                end
+                            end
+
+                            if shouldInteract and obj.Enabled then
+                                -- Small delay to avoid spam
+                                wait(0.1)
+                                fireproximityprompt(obj)
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+    else
+        if ESPConnections.AutoInteractConnection then
+            ESPConnections.AutoInteractConnection:Disconnect()
+            ESPConnections.AutoInteractConnection = nil
+        end
+    end
+end
+
+function AutoInteract.SetRange(range)
+    AutoInteract.Range = range
+end
+
 function DoorsUtils.ToggleEntityProtection()
     local entities = {"Seek", "Screech", "A90", "Rush", "Ambush", "Eyes", "Halt"}
 
@@ -553,6 +735,28 @@ ESPTypesGroupbox:AddToggle("HighlightDoors", {
     Tooltip = "Show ESP for doors"
 })
 
+ESPTypesGroupbox:AddToggle("HighlightInteractables", {
+    Text = "Highlight Interactables",
+    Default = true,
+    Tooltip = "Show ESP for levers, buttons, drawers, etc."
+})
+
+local ESPFiltersGroupbox = ESPTab:AddLeftGroupbox("ESP Filters")
+
+ESPFiltersGroupbox:AddButton("Clear All ESP", function()
+    for object, data in pairs(ESPObjects) do
+        RemoveESP(object)
+    end
+    LinoriaLib:Notify("All ESP cleared!", 2)
+end)
+
+ESPFiltersGroupbox:AddButton("Refresh ESP Now", function()
+    RefreshESP()
+    LinoriaLib:Notify("ESP refreshed manually!", 2)
+end)
+
+ESPFiltersGroupbox:AddLabel("ESP will auto-refresh when new rooms are generated")
+
 -- Player Tab
 local MovementGroupbox = PlayerTab:AddLeftGroupbox("Movement")
 
@@ -646,6 +850,30 @@ DoorsGroupbox:AddToggle("InstantInteract", {
     end
 })
 
+DoorsGroupbox:AddToggle("AutoInteract", {
+    Text = "Auto Interact",
+    Default = false,
+    Tooltip = "Automatically interact with nearby items",
+    Callback = function(value)
+        if value ~= AutoInteract.Enabled then
+            AutoInteract.Toggle()
+        end
+    end
+})
+
+DoorsGroupbox:AddSlider("AutoInteractRange", {
+    Text = "Auto Interact Range",
+    Default = 20,
+    Min = 5,
+    Max = 50,
+    Rounding = 0,
+    Compact = false,
+    Tooltip = "Range for auto-interact (studs)",
+    Callback = function(value)
+        AutoInteract.SetRange(value)
+    end
+})
+
 DoorsGroupbox:AddButton("Remove All Entities", function()
     DoorsUtils.ToggleEntityProtection()
     LinoriaLib:Notify("All entities removed!", 2)
@@ -712,6 +940,8 @@ KeybindsGroupbox:AddLabel("Toggle GUI: Right Control")
 KeybindsGroupbox:AddLabel("Toggle ESP: F1")
 KeybindsGroupbox:AddLabel("Toggle Noclip: N")
 KeybindsGroupbox:AddLabel("Toggle Fly: F")
+KeybindsGroupbox:AddLabel("Toggle Auto-Interact: I")
+KeybindsGroupbox:AddLabel("Refresh ESP: R")
 
 local ConfigGroupbox = SettingsTab:AddRightGroupbox("Configuration")
 
@@ -734,14 +964,26 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if input.KeyCode == Config.Keybinds.ToggleESP then
         Config.ESP.Enabled = not Config.ESP.Enabled
         LinoriaLib.Toggles.EnableESP:SetValue(Config.ESP.Enabled)
+        LinoriaLib:Notify("ESP " .. (Config.ESP.Enabled and "Enabled" or "Disabled"), 1)
 
     elseif input.KeyCode == Config.Keybinds.ToggleNoclip then
         PlayerUtils.ToggleNoclip()
         LinoriaLib.Toggles.Noclip:SetValue(Config.Player.Noclip)
+        LinoriaLib:Notify("Noclip " .. (Config.Player.Noclip and "Enabled" or "Disabled"), 1)
 
     elseif input.KeyCode == Config.Keybinds.ToggleFly then
         PlayerUtils.ToggleFly()
         LinoriaLib.Toggles.Fly:SetValue(Config.Player.Fly)
+        LinoriaLib:Notify("Fly " .. (Config.Player.Fly and "Enabled" or "Disabled"), 1)
+
+    elseif input.KeyCode == Config.Keybinds.ToggleAutoInteract then
+        AutoInteract.Toggle()
+        LinoriaLib.Toggles.AutoInteract:SetValue(AutoInteract.Enabled)
+        LinoriaLib:Notify("Auto-Interact " .. (AutoInteract.Enabled and "Enabled" or "Disabled"), 1)
+
+    elseif input.KeyCode == Config.Keybinds.RefreshESP then
+        RefreshESP()
+        LinoriaLib:Notify("ESP Refreshed!", 1)
     end
 end)
 
@@ -808,7 +1050,13 @@ end)
 Initialize()
 
 print("rakione HUB - Doors Script v2.0.0 loaded successfully!")
-print("Press Right Control to toggle GUI")
-print("Press F1 to toggle ESP")
-print("Press N to toggle Noclip")
-print("Press F to toggle Fly")
+print("=== KEYBINDS ===")
+print("Right Control - Toggle GUI")
+print("F1 - Toggle ESP")
+print("N - Toggle Noclip")
+print("F - Toggle Fly")
+print("I - Toggle Auto-Interact")
+print("R - Refresh ESP")
+print("================")
+print("ESP now filters out lag-causing objects and auto-refreshes!")
+print("Auto-Interact will collect nearby items automatically!")
